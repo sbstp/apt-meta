@@ -1,0 +1,143 @@
+#!/usr/bin/env python3
+
+import itertools
+import re
+import subprocess
+import sys
+
+_RE_TERM = re.compile(r'[,\n]')
+_RE_PKG = re.compile(r'\s*([^\s]+)(?:\s+\(.+\))?\s*')
+_RE_META = re.compile(r'Section:\s*metapackages\n')
+
+
+def parse_field(field):
+    match = _RE_PKG.match(field)
+    return match.group(1)
+
+
+def parse_dependencies(line):
+    """
+    Parse the list of packages with their version.
+    """
+    deps = []
+    start = line.index(':') + 1
+    while True:
+        end = _RE_TERM.search(line, start)
+        if not end:
+            break
+        end = end.start()
+        field = line[start:end]
+        # check for an or
+        if field.find('|') == -1:
+            deps.append(parse_field(field))
+        else:
+            deps.append(tuple(map(parse_field, field.split('|'))))
+        start = end + 1
+    return deps
+
+
+def select(pkgs):
+    """
+    Select between optional packages.
+    """
+    print('You may select between:')
+    for idx, pkg in enumerate(pkgs):
+        print('{}: {}'.format(idx, pkg))
+    while True:
+        try:
+            selection = int(input('Your choice: '))
+            if selection not in range(len(pkgs)):
+                raise ValueError
+            return pkgs[selection]
+        except ValueError:
+            print('Bad input, try again.')
+
+
+def exclude_pkgs(packages, exclude_list):
+    """
+    Exclude elements of a list by index.
+    """
+    return [pkg for idx, pkg in enumerate(packages) if idx not in exclude_list]
+
+
+def info(pkgname):
+    """
+    Get the package information from apt-cache.
+    """
+    try:
+        output = subprocess.check_output(('apt-cache', 'show', pkgname),
+                                         stderr=subprocess.DEVNULL).decode()
+    except subprocess.CalledProcessError:
+        raise ValueError
+    depends = []
+    recommends = []
+    is_meta = False
+
+    for line in output.splitlines(True):
+        if line.startswith("Depends:"):
+            depends = parse_dependencies(line)
+        elif line.startswith("Recommends:"):
+            recommends = parse_dependencies(line)
+        elif _RE_META.match(line):
+            is_meta = True
+    return (depends, recommends, is_meta)
+
+
+def install(packages):
+    """
+    Run apt-get install with the selected packages.
+    """
+    subprocess.call(['apt-get', 'install'] + packages)
+
+
+def fail(msg, code=1):
+    """
+    Print message to stderr and exit with code.
+    """
+    print(msg, file=sys.stderr)
+    exit(code)
+
+
+def main():
+    if len(sys.argv) != 2:
+        fail('Usage: apt-meta PACKAGE\n\n' +
+             'Select packages to install from metapackage.')
+
+    try:
+        depends, recommends, is_meta = info(sys.argv[1])
+    except ValueError:
+        fail('The package was not found.')
+
+    if not is_meta:
+        fail('The package you have selected is not a metapackage.')
+
+    packages = []
+    for pkg in itertools.chain(depends, recommends):
+        if isinstance(pkg, tuple):
+            packages.append(select(pkg))
+        else:
+            packages.append(pkg)
+
+    print('Choose the packages to exclude:')
+    for idx, pkg in enumerate(packages):
+        print('{}: {}'.format(idx, pkg))
+    while True:
+        lst = input('Enter numbers to exclude separated by a comma: ')
+        try:
+            lst = tuple(map(int, lst.split(',')))
+        except ValueError:
+            print('Invalid list. Try again.')
+        else:
+            print('You have selected to exclude the packages {}.'
+                  .format(', '.join(packages[idx] for idx in lst)))
+            ok = input('Is this information correct? [y/N] ')
+            if ok.lower() == 'y':
+                install(exclude_pkgs(packages, lst))
+                break
+
+
+if __name__ == '__main__':
+    try:
+        main()
+    except KeyboardInterrupt:
+        print()
